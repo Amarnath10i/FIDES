@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>FIDES — Risk Intelligence Pipeline</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div class="container">
+    <header class="header">
+      <div class="brand">
+        <div class="logo">F</div>
+        <div>
+          <h1>FIDES</h1>
+          <p>Federated Intelligence for Document & Entity Scoring</p>
+        </div>
+      </div>
+      <div class="status-pill">
+        <span class="dot {% if gemini_ready %}ok{% else %}bad{% endif %}"></span>
+        <span>Gemini · {{ model_name }} · {% if gemini_ready %}connected{% else %}offline{% endif %}</span>
+      </div>
+    </header>
+
+    <section class="hero">
+      <h2>Trade compliance, decoded in seconds.</h2>
+      <p>Upload shipping documents and let the pipeline extract entities, score risk against sanctions, AIS, market price &amp; address signals, then generate an explainable audit report.</p>
+    </section>
+
+    {% if not gemini_ready %}
+    <div class="alert">
+      ⚠️ {{ gemini_error }} Open <code>.env</code>, paste your Gemini API key, and restart the server. The pipeline will use mock extraction until then.
+    </div>
+    {% endif %}
+
+    <div class="grid">
+      <!-- Upload -->
+      <div class="card">
+        <h3>1 · Upload documents</h3>
+        <div id="dropzone" class="dropzone">
+          <div class="icon">📄</div>
+          <div><strong>Drop PDFs or images here</strong></div>
+          <div class="hint">or click to browse · PDF, JPG, PNG, WEBP</div>
+          <input id="fileInput" type="file" multiple accept=".pdf,.jpg,.jpeg,.png,.webp,.bmp" hidden />
+        </div>
+        <div id="fileList" class="files"></div>
+        <div class="actions">
+          <button id="analyzeBtn" class="btn" disabled>Run Analysis</button>
+          <button id="clearBtn" class="btn ghost">Clear</button>
+        </div>
+        <div id="loader" class="loader">
+          <div class="spinner"></div>
+          Running 5-stage pipeline…
+        </div>
+      </div>
+
+      <!-- Extracted entities -->
+      <div class="card">
+        <h3>2 · Extracted entities</h3>
+        <div id="entities" class="kv">
+          <div class="k">Status</div><div class="v">Awaiting upload</div>
+        </div>
+      </div>
+    </div>
+
+    <div id="results" class="results">
+      <div class="risk-banner" id="riskBanner">
+        <div>
+          <div style="font-size:12px;color:var(--text-dim);text-transform:uppercase;letter-spacing:.12em;">Overall risk</div>
+          <h2 id="riskLevel">—</h2>
+        </div>
+        <div class="score" id="riskScore">—</div>
+      </div>
+
+      <div class="grid">
+        <div class="card">
+          <h3>3 · Risk factors</h3>
+          <div id="factors" class="factors"></div>
+        </div>
+        <div class="card">
+          <h3>4 · Federated fingerprint</h3>
+          <div id="fingerprint" class="kv"></div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:20px;">
+        <h3>5 · Audit report</h3>
+        <div id="report" class="report"></div>
+      </div>
+
+      <div class="chat">
+        <h3>Ask the compliance assistant</h3>
+        <div id="chatLog" class="chat-log"></div>
+        <form id="chatForm" class="chat-input">
+          <input id="chatInput" type="text" placeholder="e.g. Why is this transaction high risk?" autocomplete="off" />
+          <button class="btn" style="flex:0 0 auto;padding:12px 22px;" type="submit">Send</button>
+        </form>
+      </div>
+    </div>
+  </div>
+
+<script>
+const dropzone = document.getElementById('dropzone');
+const fileInput = document.getElementById('fileInput');
+const fileList = document.getElementById('fileList');
+const analyzeBtn = document.getElementById('analyzeBtn');
+const clearBtn = document.getElementById('clearBtn');
+const loader = document.getElementById('loader');
+const results = document.getElementById('results');
+let files = [];
+let lastContext = null;
+
+function refresh() {
+  fileList.innerHTML = '';
+  files.forEach((f, i) => {
+    const el = document.createElement('div');
+    el.className = 'file';
+    el.innerHTML = `<div class="name">📎 <span>${f.name}</span> <span style="color:var(--text-mute);font-size:12px;">(${(f.size/1024).toFixed(1)} KB)</span></div>`;
+    const btn = document.createElement('button');
+    btn.textContent = '×';
+    btn.onclick = () => { files.splice(i, 1); refresh(); };
+    el.appendChild(btn);
+    fileList.appendChild(el);
+  });
+  analyzeBtn.disabled = files.length === 0;
+}
+
+dropzone.onclick = () => fileInput.click();
+fileInput.onchange = e => { files = files.concat([...e.target.files]); refresh(); fileInput.value = ''; };
+['dragover','dragenter'].forEach(ev => dropzone.addEventListener(ev, e => { e.preventDefault(); dropzone.classList.add('drag'); }));
+['dragleave','drop'].forEach(ev => dropzone.addEventListener(ev, e => { e.preventDefault(); dropzone.classList.remove('drag'); }));
+dropzone.addEventListener('drop', e => { files = files.concat([...e.dataTransfer.files]); refresh(); });
+
+clearBtn.onclick = () => { files = []; refresh(); results.classList.remove('show'); };
+
+analyzeBtn.onclick = async () => {
+  if (!files.length) return;
+  loader.classList.add('show'); analyzeBtn.disabled = true; results.classList.remove('show');
+  const fd = new FormData();
+  files.forEach(f => fd.append('files', f));
+  try {
+    const res = await fetch('/analyze', { method: 'POST', body: fd });
+    if (!res.ok) throw new Error((await res.json()).detail || 'Analysis failed');
+    const data = await res.json();
+    lastContext = data;
+    render(data);
+  } catch (err) {
+    alert('Error: ' + err.message);
+  } finally {
+    loader.classList.remove('show'); analyzeBtn.disabled = false;
+  }
+};
+
+function render(data) {
+  // Entities
+  const e = data.extracted_data || {};
+  const ent = document.getElementById('entities');
+  ent.innerHTML = '';
+  const labels = {
+    vessel_name:'Vessel', hs_code:'HS Code', total_weight:'Weight',
+    unit_price:'Unit price', shipper_name:'Shipper', consignee_address:'Consignee',
+    invoice_amount:'Invoice', bl_number:'B/L No.', product_description:'Product'
+  };
+  Object.entries(labels).forEach(([k,l]) => {
+    ent.insertAdjacentHTML('beforeend', `<div class="k">${l}</div><div class="v">${e[k] || '—'}</div>`);
+  });
+
+  // Risk banner
+  const r = data.risk_assessment || {};
+  const banner = document.getElementById('riskBanner');
+  banner.className = 'risk-banner ' + (r.risk_level || '').toLowerCase();
+  document.getElementById('riskLevel').textContent = r.risk_level || '—';
+  document.getElementById('riskScore').textContent = (r.overall_risk_score ?? 0).toFixed(2);
+
+  // Factors
+  const fac = document.getElementById('factors');
+  fac.innerHTML = '';
+  const flabels = {
+    ais_risk:'AIS / vessel tracking', shipper_sanctions_risk:'Shipper sanctions',
+    consignee_sanctions_risk:'Consignee sanctions', price_risk:'Market price deviation',
+    address_risk:'Address quality', vessel_history_risk:'Vessel history'
+  };
+  Object.entries(flabels).forEach(([k,l]) => {
+    const s = (r.risk_factors?.[k]?.risk_score) ?? 0;
+    const pct = Math.round(s * 100);
+    fac.insertAdjacentHTML('beforeend',
+      `<div class="factor"><div class="label">${l}</div><div class="bar"><span style="width:${pct}%"></span></div><div class="pct">${pct}%</div></div>`);
+  });
+
+  // Fingerprint
+  const fp = data.federated_fingerprint || {};
+  const fpEl = document.getElementById('fingerprint');
+  fpEl.innerHTML = `
+    <div class="k">Hash</div><div class="v">#${fp.risk_fingerprint_hash ?? '—'}</div>
+    <div class="k">Privacy</div><div class="v">${fp.privacy_note ?? '—'}</div>
+    <div class="k">Price deviation</div><div class="v">${fp.sharable_features?.price_deviation ?? 0}%</div>
+    <div class="k">Vessel risk</div><div class="v">${((fp.sharable_features?.vessel_risk ?? 0)*100).toFixed(0)}%</div>
+    <div class="k">Sanctions risk</div><div class="v">${((fp.sharable_features?.sanctions_risk ?? 0)*100).toFixed(0)}%</div>`;
+
+  // Report
+  document.getElementById('report').textContent = data.audit_report || '';
+  document.getElementById('chatLog').innerHTML = '';
+  results.classList.add('show');
+  results.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+// Chat
+const chatForm = document.getElementById('chatForm');
+const chatInput = document.getElementById('chatInput');
+const chatLog = document.getElementById('chatLog');
+chatForm.onsubmit = async (e) => {
+  e.preventDefault();
+  const q = chatInput.value.trim();
+  if (!q) return;
+  add('user', q); chatInput.value = '';
+  const typing = add('bot', '…');
+  try {
+    const res = await fetch('/chat', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ question: q, context: lastContext })
+    });
+    const data = await res.json();
+    typing.textContent = data.answer || 'No answer.';
+  } catch {
+    typing.textContent = 'Network error.';
+  }
+};
+function add(role, text) {
+  const m = document.createElement('div');
+  m.className = 'msg ' + role;
+  m.textContent = text;
+  chatLog.appendChild(m);
+  chatLog.scrollTop = chatLog.scrollHeight;
+  return m;
+}
+</script>
+</body>
+</html>
