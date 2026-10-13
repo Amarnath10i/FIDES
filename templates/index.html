@@ -154,6 +154,11 @@ analyzeBtn.onclick = async () => {
   }
 };
 
+function esc(v) {
+  // extracted fields come from uploaded documents via an LLM; never insert them as HTML
+  return String(v).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
 function render(data) {
   // Entities
   const e = data.extracted_data || {};
@@ -165,8 +170,11 @@ function render(data) {
     invoice_amount:'Invoice', bl_number:'B/L No.', product_description:'Product'
   };
   Object.entries(labels).forEach(([k,l]) => {
-    ent.insertAdjacentHTML('beforeend', `<div class="k">${l}</div><div class="v">${e[k] || '—'}</div>`);
+    ent.insertAdjacentHTML('beforeend', `<div class="k">${l}</div><div class="v">${esc(e[k] || '—')}</div>`);
   });
+  if (data.extraction_source === 'sample') {
+    ent.insertAdjacentHTML('beforeend', `<div class="k">Note</div><div class="v">Sample shipment shown: no Gemini key is configured, so the uploaded documents were not read.</div>`);
+  }
 
   // Risk banner
   const r = data.risk_assessment || {};

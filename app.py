@@ -4,6 +4,7 @@ FastAPI backend that orchestrates a 5-stage trade-compliance analysis.
 """
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import os
@@ -220,7 +221,9 @@ class DocumentProcessor:
 # ---------------------------------------------------------------------------
 # Stage 2 — Entity extraction
 # ---------------------------------------------------------------------------
-MOCK_ENTITIES = {
+# Used only when no Gemini key is configured, so the UI can be demonstrated;
+# responses then carry extraction_source = "sample" and the page says so.
+SAMPLE_ENTITIES = {
     "vessel_name": "MV STAR",
     "hs_code": "520100",
     "total_weight": "5000",
@@ -249,14 +252,24 @@ Document text:
 {text[:6000]}
 \"\"\"
 """
-        raw = call_gemini(prompt)
+        if _gemini_model is None:
+            return dict(SAMPLE_ENTITIES), "sample"
+        raw, err = call_gemini(prompt)
         if not raw:
-            return dict(MOCK_ENTITIES)
-        try:
-            match = re.search(r"\{.*\}", raw, re.DOTALL)
-            return json.loads(match.group() if match else raw)
-        except Exception:
-            return dict(MOCK_ENTITIES)
+            raise HTTPException(status_code=502, detail=f"Entity extraction failed: {err}")
+        return parse_entities(raw), "gemini"
+
+
+def parse_entities(raw: str) -> Dict[str, Any]:
+    """The JSON object in a model reply, which may be wrapped in prose or a code fence."""
+    match = re.search(r"\{.*\}", raw, re.DOTALL)
+    try:
+        data = json.loads(match.group() if match else raw)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=502, detail=f"Model did not return JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=502, detail="Model did not return a JSON object")
+    return data
 
 
 # ---------------------------------------------------------------------------
@@ -309,11 +322,13 @@ class RiskFingerprintGenerator:
     def generate(data: Dict[str, Any], risk: Dict[str, Any]) -> Dict[str, Any]:
         factors = risk.get("risk_factors", {})
         return {
-            "risk_fingerprint_hash": abs(hash(json.dumps([
+            # sha256 rather than hash(): Python salts str hashes per process,
+            # so hash() gave the same shipment a different id on every restart.
+            "risk_fingerprint_hash": int(hashlib.sha256(json.dumps([
                 data.get("hs_code", ""),
                 (data.get("vessel_name", "") or "")[:3],
                 risk.get("overall_risk_score", 0),
-            ]))) % 1_000_000,
+            ]).encode()).hexdigest(), 16) % 1_000_000,
             "privacy_note": "No PII shared — only risk indicators.",
             "sharable_features": {
                 "price_deviation": factors.get("price_risk", {}).get("deviation_percentage", 0),
@@ -377,7 +392,7 @@ Structure:
 3. Regulatory Implications
 4. Recommended Actions
 """
-        ai = call_gemini(prompt)
+        ai, _ = call_gemini(prompt)
         if ai:
             return ai
 
@@ -427,7 +442,7 @@ async def analyze(files: List[UploadFile] = File(...)):
         for f in files:
             all_text += await DocumentProcessor.process(f) + "\n"
 
-        extracted = await EntityExtractor.extract(all_text)
+        extracted, source = await EntityExtractor.extract(all_text)
         risk = RiskEnricher.enrich(extracted)
         fingerprint = RiskFingerprintGenerator.generate(extracted, risk)
         report = ReportGenerator.generate(extracted, risk)
@@ -435,6 +450,7 @@ async def analyze(files: List[UploadFile] = File(...)):
         return JSONResponse(
             {
                 "extracted_data": extracted,
+                "extraction_source": source,
                 "risk_assessment": risk,
                 "federated_fingerprint": fingerprint,
                 "audit_report": report,
