@@ -1,0 +1,21 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install fastapi python-multipart google-generativeai PyPDF2 pillow python-dotenv numpy jinja2 httpx pytest
+      - name: Pipeline and API tests (no network, no OCR)
+        run: pytest -q
